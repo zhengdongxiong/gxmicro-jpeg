@@ -30,6 +30,8 @@ static void gxmicro_jpeg_set_subsampling(struct gxmicro_jpeg_dev *gdev, uint32_t
 		break;
 	}
 
+	gdev->subsampling = val;
+
 	gxmicro_write(gdev, JPEG_CONF, jconf);
 }
 

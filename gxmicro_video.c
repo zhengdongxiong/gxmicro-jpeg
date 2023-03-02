@@ -13,15 +13,94 @@
 
 #include "gxmicro_jpeg.h"
 
-/* Reserved, 设置默认 bs len max 寄存器 ? */
+#define INPUT_INFO	"GXMicro VGA Capture"
+#define CAP_INFO	"GXMicro JPEG"
+
+/* ****************************** V4L2 File OPS ****************************** */
+
+static void gxmicro_jpeg_on(struct gxmicro_jpeg_dev *gdev)
+{
+	uint32_t jconf;
+
+	jconf = gxmicro_read(gdev, JPEG_CONF);
+	jconf |= JPEG_INTR_ENABLE;
+
+	gxmicro_write(gdev, JPEG_CONF, jconf);
+	gxmicro_write(gdev, JPEG_INTR, JPEG_INTR_MASK);
+	gxmicro_write(gdev, JPEG_BS_LEN_MAX, JPEG_MAX_BS);
+
+	/* Reserved: clk, dma */
+}
+
+static void gxmicro_jpeg_off(struct gxmicro_jpeg_dev *gdev)
+{
+	uint32_t jconf;
+
+	jconf = gxmicro_read(gdev, JPEG_CONF);
+	jconf &= ~JPEG_INTR_ENABLE;
+
+	gxmicro_write(gdev, JPEG_CONF, jconf);
+	gxmicro_write(gdev, JPEG_INTR, JPEG_INTR_MASK);
+	gxmicro_write(gdev, JPEG_BS_LEN_MAX, JPEG_MIN_BS);
+
+	/* Reserved: clk, dma */
+}
+
+static int gxmicro_jpeg_open(struct file *file)
+{
+	struct gxmicro_jpeg_dev *gdev = video_drvdata(file);
+	int ret = 0;
+
+	mutex_lock(&gdev->vlock);
+
+	ret = v4l2_fh_open(file);
+	if (ret)
+		goto jpeg_open;
+
+	if (v4l2_fh_is_singular_file(file))
+		gxmicro_jpeg_on(gdev);
+
+jpeg_open:
+	mutex_unlock(&gdev->vlock);
+	return ret;
+}
+
+static int gxmicro_jpeg_release(struct file *file)
+{
+	struct gxmicro_jpeg_dev *gdev = video_drvdata(file);
+	int ret = 0;
+
+	mutex_lock(&gdev->vlock);
+
+	if (v4l2_fh_is_singular_file(file))
+		gxmicro_jpeg_off(gdev);
+
+	ret = _vb2_fop_release(file, NULL);
+
+	mutex_unlock(&gdev->vlock);
+
+	return ret;
+}
+
+static const struct v4l2_file_operations gxmicro_v4l2_fops = {
+	.owner = THIS_MODULE,
+	.read = vb2_fop_read,
+	.poll = vb2_fop_poll,
+	.unlocked_ioctl = video_ioctl2,
+	.mmap = vb2_fop_mmap,
+	.open = gxmicro_jpeg_open,
+	.release = gxmicro_jpeg_release,
+};
+
+/* ****************************** V4L2 ioctl ****************************** */
 
 static int gxmicro_vidioc_querycap(struct file *file, void *fh, struct v4l2_capability *cap)
 {
 	struct gxmicro_jpeg_dev *gdev = video_drvdata(file);
 
 	strscpy(cap->driver, DRVNAME, sizeof(cap->driver));
-	strscpy(cap->card, "Gxmicro JPEG", sizeof(cap->card));
-	snprintf(cap->bus_info, sizeof(cap->bus_info), "platform:%s", dev_name(gdev->dev));
+	strscpy(cap->card, CAP_INFO, sizeof(cap->card));
+	snprintf(cap->bus_info, sizeof(cap->bus_info), "platform: %s", dev_name(gdev->dev));
 
 	return 0;
 }
@@ -41,7 +120,7 @@ static int gxmicro_vidioc_g_fmt_vid_cap(struct file *file, void *fh, struct v4l2
 	struct gxmicro_jpeg_dev *gdev = video_drvdata(file);
 	uint32_t jconf, width, height;
 	uint8_t bpp;
-	uint32_t bytesperline, sizeimage;
+	uint32_t bpl, sizeimage;
 
 	width = gxmicro_read(gdev, JPEG_WIDTH);
 	height = gxmicro_read(gdev, JPEG_HEIGHT);
@@ -49,21 +128,22 @@ static int gxmicro_vidioc_g_fmt_vid_cap(struct file *file, void *fh, struct v4l2
 
 	switch (jconf & JPEG_ENC_FORMAT_MASK) {
 	case JPEG_ENC_RBG565:
-		bpp = JPEG_RGB565_BPP;
+	case JPEG_ENC_YUV422:
+		bpp = JPEG_16BPP;
 		break;
 	case JPEG_ENC_XRGB888:
-		bpp = JPEG_XRGB888_BPP;
+		bpp = JPEG_32BPP;
 		break;
 	}
 
-	bytesperline = width * bpp;
-	sizeimage = bytesperline * height;
+	bpl = JPEG_BPL(width, bpp);
+	sizeimage = JPEG_SZ(height, bpl);
 
 	f->fmt.pix.width = width;
 	f->fmt.pix.height = height;
 	f->fmt.pix.pixelformat = V4L2_PIX_FMT_JPEG;
 	f->fmt.pix.field = V4L2_FIELD_NONE;
-	f->fmt.pix.bytesperline = bytesperline;
+	f->fmt.pix.bytesperline = bpl;
 	f->fmt.pix.sizeimage = sizeimage;
 	f->fmt.pix.colorspace = V4L2_COLORSPACE_JPEG;
 	f->fmt.pix.flags = 0;		/* videodev2.h, line: 1667, JPEG: always power on */
@@ -90,7 +170,7 @@ static int gxmicro_vidioc_enum_input(struct file *file, void *fh, struct v4l2_in
 	if (inp->index)
 		return -EINVAL;
 
-	strscpy(inp->name, "Host VGA Capture", sizeof(inp->name));
+	strscpy(inp->name, INPUT_INFO, sizeof(inp->name));
 	inp->type = V4L2_INPUT_TYPE_CAMERA;
 	inp->capabilities = V4L2_IN_CAP_DV_TIMINGS;
 
@@ -172,8 +252,8 @@ static const struct v4l2_dv_timings_cap gxmicro_dv_timings_cap = {
 		.max_height = JPEG_MAX_HEIGHT,
 		.min_pixelclock = JPEG_MIN_PCLK,
 		.max_pixelclock = JPEG_MAX_PCLK,
-		.standards = V4L2_DV_BT_STD_CEA861 | V4L2_DV_BT_STD_DMT,	/* Unknown */
-		.capabilities = V4L2_DV_BT_CAP_PROGRESSIVE | V4L2_DV_BT_CAP_CUSTOM,	/* Unknown */
+		.standards = V4L2_DV_BT_STD_CEA861 | V4L2_DV_BT_STD_DMT,	/* Reserved: Unknown */
+		.capabilities = V4L2_DV_BT_CAP_PROGRESSIVE | V4L2_DV_BT_CAP_CUSTOM,	/* Reserved: Unknown */
 	},
 };
 
@@ -224,30 +304,13 @@ static int gxmicro_vidioc_dv_timings_cap(struct file *file, void *fh, struct v4l
 	return 0;
 }
 
-static const struct v4l2_file_operations gxmicro_v4l2_fops = {
-	.owner = THIS_MODULE,
-	.read = vb2_fop_read,
-	.poll = vb2_fop_poll,
-	.unlocked_ioctl = video_ioctl2,
-	.mmap = vb2_fop_mmap,
-	.open = v4l2_fh_open,	/* Reserved，需要 open 时初始化某些值, 自定义 open 函数 */
-	.release = vb2_fop_release,	/* Reserved, open 时初始化某些值 自定义 release 函数 */
-};
-
 static const struct v4l2_ioctl_ops gxmicro_v4l2_ioctl_ops = {
-	/* VIDIOC_QUERYCAP */
+
+	/* VIDIOC */
 	.vidioc_querycap = gxmicro_vidioc_querycap,
-
-	/* VIDIOC_ENUM_FMT */
 	.vidioc_enum_fmt_vid_cap = gxmicro_vidioc_enum_fmt,
-
-	/* VIDIOC_G_FMT */
 	.vidioc_g_fmt_vid_cap = gxmicro_vidioc_g_fmt_vid_cap,
-
-	/* VIDIOC_S_FMT */
 	.vidioc_s_fmt_vid_cap = gxmicro_vidioc_s_fmt_vid_cap,
-
-	/* VIDIOC_TRY_FMT */
 	.vidioc_try_fmt_vid_cap = gxmicro_vidioc_try_fmt_vid_cap,
 
 	/* Videobuffer */
@@ -288,6 +351,8 @@ static const struct v4l2_ioctl_ops gxmicro_v4l2_ioctl_ops = {
 	.vidioc_dv_timings_cap = gxmicro_vidioc_dv_timings_cap,
 };
 
+/* ****************************** Video Init & Fini ****************************** */
+
 int gxmicro_video_init(struct gxmicro_jpeg_dev *gdev)
 {
 	struct video_device *vdev = &gdev->vdev;
@@ -297,7 +362,7 @@ int gxmicro_video_init(struct gxmicro_jpeg_dev *gdev)
 	vdev->device_caps = V4L2_CAP_VIDEO_CAPTURE | V4L2_CAP_READWRITE | V4L2_CAP_STREAMING;
 	vdev->v4l2_dev = &gdev->v4l2;
 	vdev->queue = &gdev->vbq;
-	strscpy(vdev->name, DRVNAME, sizeof(vdev->name));
+	strscpy(vdev->name, CAP_INFO, sizeof(vdev->name));
 	vdev->vfl_dir = VFL_DIR_RX;
 	vdev->release = video_device_release_empty;
 	vdev->ioctl_ops = &gxmicro_v4l2_ioctl_ops;

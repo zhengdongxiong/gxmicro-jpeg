@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: GPL-2.0-only
+
+config VIDEO_GXMICRO
+	tristate "GXMicor JPEG Driver"
+	depends on VIDEO_V4L2
+	select VIDEOBUF2_DMA_CONTIG
+	help
+	  This is a v4l2 driver for the GXMicro JEPG.
+	  The JPEG can compress video data.
+	  To compile this driver as a module, choose M here: the
+	  module will be called gxmicro_jpeg.
+

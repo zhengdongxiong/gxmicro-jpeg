@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- * GXMicro JPEG Controller Device
+ * GXMicro JPEG Controller
  *
  * Copyright (C) 2022 GXMicro (ShangHai) Corp.
  *
@@ -14,9 +14,9 @@
 #include <media/v4l2-ctrls.h>
 #include <media/videobuf2-core.h>
 
-#define DRVNAME				"gxmicro-jpeg"
+#define DRVNAME		"GXMicro-jpeg"
 
-/* ============================== JPEG Controller ============================== */
+/* ****************************** JPEG Controller ****************************** */
 
 #define JPEG_BASE			0x00670000
 
@@ -25,7 +25,7 @@
 #define JPEG_RATE			30
 #define JPEG_MIN_WIDTH			640
 #define JPEG_MIN_HEIGHT			480
-#define JPEG_MIN_PCLK			12587500	/* 640 x 480 x 30Hz, pclk (480p 60Hz) / 2 */
+#define JPEG_MIN_PCLK			12587500	/* 640 x 480 x 30Hz, pclk (640 x 480 60Hz) / 2 */
 #define JPEG_MAX_WIDTH			1920
 #define JPEG_MAX_HEIGHT			1080
 #define JPEG_MAX_PCLK			74250000	/* 1920 x 1080 x 30Hz, pclk (1920 x 1080 60Hz) / 2 */
@@ -45,7 +45,8 @@
 #define JPEG_VERSION			JPEG_OFFSET(0x2C)
 
 /* JEPG Crtl Resgister */
-#define JPEG_ENCODER_START		BIT(0)
+#define JPEG_ENC_START			BIT(0)
+#define JPEG_ENC_STOP			0
 
 /* JEPG Configuration Resgister */
 #define JPEG_INTR_ENABLE		BIT(12)
@@ -55,34 +56,50 @@
 # define JPEG_CHROMA_SUBSAMPLING_MASK	~(BIT(V4L2_JPEG_CHROMA_SUBSAMPLING_444) | BIT(V4L2_JPEG_CHROMA_SUBSAMPLING_420))
 #define JPEG_ENC_FORMAT_MASK		GENMASK(3,0)
 # define JPEG_ENC_RBG565		0
-#  define JPEG_RGB565_BPP		2
 # define JPEG_ENC_RBG888		BIT(0)	/* Not Support */
 # define JPEG_ENC_YUV422		BIT(1)
 # define JPEG_ENC_XRGB888		GENMASK(1,0)
-#  define JPEG_XRGB888_BPP		4
+#define JPEG_32BPP			32	/* ARGB8888, XRGB8888 */
+#define JPEG_24BPP			24	/* RGB888, YUV444 */
+#define JPEG_16BPP			16	/* RGB565, YUV422 */
+#define JPEG_12BPP			12	/* YUV420 */
+#define JPEG_BPL(w, bpp)		((((w) * (bpp)) / 8))
+#define JPEG_SZ(h, bpl)			((h) * (bpl))
+
+/* JEPG BS Len Max Resgister */
+#define JPEG_MAX_BS			(((JPEG_MAX_WIDTH) * (JPEG_MAX_HEIGHT) * (JPEG_32BPP)) / 8)
+#define JPEG_MIN_BS			0
 
 /* JEPG Quality Resgister */
-#define JPEG_QP_MIN			1
 #define JPEG_QP_MAX			2047
+#define JPEG_QP_MIN			1
 #define JPEG_QP_DEF			128
 
 /* JEPG Intr Resgister */
+#define JPEG_BS_OVERFLOW		BIT(8)
 #define JPEG_EOF			BIT(0)
-#define JPEG_BS_OVERALOW		BIT(8)
-
-/* ============================== JPEG Device ============================== */
+#define JPEG_INTR_MASK			(JPEG_BS_OVERFLOW | JPEG_EOF)
 
 struct gxmicro_jpeg_dev {
+
+	struct device *dev;
+
+	void __iomem *mem;
+
 	struct v4l2_device v4l2;
 	struct vb2_queue vbq;
 	struct v4l2_ctrl_handler hdl;
 	struct video_device vdev;
 
-	struct mutex vlock;	/* video, videobuf2 lock */
+	/* video, videobuf2 fops lock */
+	struct mutex vlock;
 
-	struct device *dev;
+	/* videobuf2 */
+	spinlock_t buf_lock;	/* buffers list lock */
+	struct list_head buffers;
 
-	void __iomem *mem;
+	enum v4l2_jpeg_chroma_subsampling subsampling;
+	uint32_t sequence;
 };
 
 static inline uint32_t gxmicro_read(struct gxmicro_jpeg_dev *gdev, uint32_t reg)
@@ -94,9 +111,6 @@ static inline void gxmicro_write(struct gxmicro_jpeg_dev *gdev, uint32_t reg, ui
 {
 	iowrite32(value, gdev->mem + reg);
 }
-
-int gxmicro_v4l2_init(struct gxmicro_jpeg_dev *gdev);
-void gxmicro_v4l2_fini(struct gxmicro_jpeg_dev *gdev);
 
 int gxmicro_ctrls_init(struct gxmicro_jpeg_dev *gdev);
 void gxmicro_ctrls_fini(struct gxmicro_jpeg_dev *gdev);
